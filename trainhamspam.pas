@@ -10,20 +10,13 @@ https://cyrusimap.org/imap/concepts/features/event-notifications.html
 Solo gestiona los eventos MessageMove (vnd.cmu.MessageMove) y MessageCopy
 (vnd.cmu.MessageCopy) para detectar
 si se ha movido el mensaje de/a la carpeta spam personal 
-Si el destino es spam se llama dspam --class=spam, si la procedencia
-es spam se llama dspam --class=innocent.
+Si el destino es spam se llama "rspamc learn_spam" si la procedencia
+es spam se llama "rspamc learn_ham".
 
-dspam tiene que ejecutarse como usuario dspam, por lo que se tiene que usar
-sudo. 
-
-Para evitar ocupar notifyd demasiado tiempo, dspam se ejecuta en un nuevo
+Para evitar ocupar notifyd demasiado tiempo, rspamc se ejecuta en un nuevo
 proceso y no se espera su fin.
 
-Para que todo funcione, hay que configurar sudo (/etc/sudoers) con
-
-  cyrus   ALL=(dspam) NOPASSWD: /usr/bin/dspam
-
-y en /etc/imapd.conf
+Para que todo funcione, hay que configurar en /etc/imapd.conf
 
   event_notifier: external
   notifysocket: /var/run/cyrus/socket/notify
@@ -56,7 +49,7 @@ type
 
 const
   //tal vez sea mejor ponerlos en un fichero de configuración
-  SPOOL='/mnt/disk1/cyrus/mail/'; //ubicación del spool
+  SPOOL='/var/spool/cyrus/mail/'; //ubicación del spool
   SPAMFOLDER='spam';              //nombre de la carpeta spam personal
   TRASHFOLDER='Trash';            //nombre de la papelera
   SEPARATOR='.';                  //cambiar a '/' si se activa unixhierarchysep
@@ -379,20 +372,15 @@ begin
 end;
 
 {-----------------------------------------------------------------------------
-  Crea un fork del programa para arrancar dspam y pasarle en su stdin
-  el mensaje
+  Crea un fork del programa para arrancar rspamc
 }
 procedure retrain(const mbox:TMailbox; const uid:string);
 const DSPAM_HEADER='X-DSPAM-Signature: ';
 var
-  messagestream: TFileStream;
-  messagefile: TextFile;
   pid: TPid;
   filename:string;
   spam: Boolean;
-  signature:string;
-  sigfound:boolean;
-  dspamresult:string;
+  rspamcresult:string;
 begin
   pid:=fpfork();
   case pid of
@@ -406,30 +394,10 @@ begin
         filename:=mbox.path+uid+'.';
         spam:=mbox.mailbox=SPAMFOLDER;
         syslog(LOG_INFO,'user %s, mailbox %s, retrain %s como %s',[pchar(mbox.user),pchar(mbox.mailbox),pchar(filename),pchar(BoolToStr(spam,'spam','ham'))]);
-        messagestream:=TFileStream.create(filename,fmOpenRead or fmShareDenyNone);
-        AssignStream(messagefile,messagestream);
-        Reset(messagefile);
-        sigfound:=false;
-        while not eof(messagefile) do
-        begin
-          readln(messagefile, signature);
-          if signature='' then //fin de las cabeceras
-           break;
-          if signature.startswith(DSPAM_HEADER) then
-          begin
-            signature:=copy(signature,length(DSPAM_HEADER)+1);
-            sigfound:=true;
-            syslog(LOG_INFO, 'usando dspam signature %s',[pchar(signature)]);
-            if RunCommand('/usr/bin/sudo',['-u','dspam','/usr/bin/dspam','--source=error','--signature='+signature,'--class='+BoolToStr(spam,'spam','innocent'),'--user',mbox.user], dspamresult) then
-              syslog(LOG_INFO,'sudo/dspam output: %s',[pchar(dspamresult)])
-            else
-              syslog(LOG_ERR,'error ejecutando sudo/dspam',[]);   
-          end; 
-        end; 
-        Close(messagefile);
-        messagestream.free;
-        if not sigfound then
-          syslog(LOG_ERR, 'no se ha encontrado dspam signature en el fichero %s',[pchar(filename)]);
+        if RunCommand('/usr/bin/rspamc',[BoolToStr(spam,'learn_spam','learn_ham'), filename],rspamcresult) then
+          syslog(LOG_INFO,'rspamc output: %s',[pchar(rspamcresult)])
+        else
+          syslog(LOG_ERR,'error ejecutando rspamc',[]);
       end
     else   //parent
       begin
